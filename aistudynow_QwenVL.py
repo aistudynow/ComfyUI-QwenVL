@@ -8,6 +8,7 @@ import json
 import os
 import platform
 import time
+import traceback
 from enum import Enum
 from pathlib import Path
 
@@ -22,8 +23,12 @@ from transformers import (
     AutoTokenizer,
     BitsAndBytesConfig,
 )
-
 import folder_paths
+
+try:
+    from tqdm import tqdm
+except Exception:
+    tqdm = None
 
 NODE_DIR = Path(__file__).parent
 CONFIG_PATH = NODE_DIR / "config.json"
@@ -158,9 +163,27 @@ def _human_bytes(n_bytes: int) -> str:
         s /= 1024.0
 
 
+def _has_required_weights(model_path: Path) -> bool:
+    if not model_path.exists():
+        return False
+    single = model_path / "model.safetensors"
+    if single.exists():
+        return True
+    index = model_path / "model.safetensors.index.json"
+    if index.exists():
+        for p in model_path.iterdir():
+            name = p.name
+            if name.startswith("model-") and name.endswith(".safetensors"):
+                return True
+    for p in model_path.iterdir():
+        name = p.name
+        if name.startswith("model-") and name.endswith(".safetensors"):
+            return True
+    return False
+
+
 class ImageProcessor:
     def to_pil(self, image_tensor: torch.Tensor) -> Image.Image:
-        # Accepts ComfyUI IMAGE tensor in [B,H,W,C] float32 0..1
         if image_tensor.dim() == 4:
             image_tensor = image_tensor[0]
         image_np = (image_tensor.cpu().numpy() * 255).astype(np.uint8)
@@ -185,17 +208,15 @@ class ModelDownloader:
         repo_id = model_info["repo_id"]
         model_folder_name = repo_id.split("/")[-1]
         model_path = self.models_dir / model_folder_name
+        model_path.mkdir(parents=True, exist_ok=True)
 
-        # if already present with files, skip
-        if model_path.exists() and any(model_path.iterdir()):
-            print(f"[aistudynow] Model '{model_name}' found at {model_path}.")
+        if _has_required_weights(model_path):
+            print(f"[aistudynow] Model '{model_name}' ready at {model_path}.")
             return str(model_path)
 
         self._print_transfer_hint()
 
-        # preflight: get list of files + sizes
-        siblings = []
-        total_size = None
+        siblings, total_size = [], None
         try:
             api = HfApi()
             info = api.model_info(repo_id=repo_id, files_metadata=True)
@@ -203,38 +224,50 @@ class ModelDownloader:
             total_size = sum([(s.size or 0) for s in siblings])
             print(f"[aistudynow] {repo_id}: about {_human_bytes(total_size)} across {len(siblings)} files.")
         except Exception as e:
-            print(f"[aistudynow] Could not fetch file list or size: {e}")
+            print(f"[aistudynow] Could not fetch file list/size: {e}")
 
-        model_path.mkdir(parents=True, exist_ok=True)
-
-        # safe allowlist for common files
-        needed_names = {
-            "config.json",
-            "generation_config.json",
-            "tokenizer.json",
-            "tokenizer_config.json",
-            "vocab.json",
-            "merges.txt",
-            "preprocessor_config.json",
-            "video_preprocessor_config.json",
-            "chat_template.json",
-            "model.safetensors.index.json",
-            "model-00001-of-00002.safetensors",
-            "model-00002-of-00002.safetensors",
-            "model-00001-of-00003.safetensors",
-            "model-00002-of-00003.safetensors",
-            "model-00003-of-00003.safetensors",
-            "model.safetensors",
-        }
+        def _wanted(s):
+            fn = s.rfilename
+            if fn == "model.safetensors" or fn == "model.safetensors.index.json":
+                return True
+            if fn.startswith("model-") and fn.endswith(".safetensors"):
+                return True
+            if fn in {
+                "config.json",
+                "generation_config.json",
+                "tokenizer.json",
+                "tokenizer_config.json",
+                "vocab.json",
+                "merges.txt",
+                "preprocessor_config.json",
+                "video_preprocessor_config.json",
+                "chat_template.json",
+            }:
+                return True
+            return False
 
         if siblings:
-            files_to_get = [s for s in siblings if s.rfilename in needed_names]
+            files_to_get = [s for s in siblings if _wanted(s)]
             if not files_to_get:
                 files_to_get = siblings
 
-            print(f"[aistudynow] Downloading {len(files_to_get)} files to {model_path} ...")
+            print(f"[aistudynow] Ensuring {len(files_to_get)} files exist in {model_path} ...")
+
+            total_known = sum([(s.size or 0) for s in files_to_get]) if files_to_get else None
+            use_bar = bool(tqdm) and isinstance(total_known, int) and total_known > 0
+            bar = tqdm(total=total_known, unit="B", unit_scale=True, desc="[aistudynow] Total", leave=False) if use_bar else None
+
             for i, s in enumerate(files_to_get, 1):
-                size_txt = _human_bytes(getattr(s, "size", None))
+                local_file = model_path / s.rfilename
+                size = getattr(s, "size", None)
+                size_txt = _human_bytes(size)
+
+                if local_file.exists() and (size is None or local_file.stat().st_size == size):
+                    if bar and size:
+                        bar.update(size)
+                    print(f"[aistudynow] [{i}/{len(files_to_get)}] {s.rfilename} (exists, {size_txt})")
+                    continue
+
                 print(f"[aistudynow] [{i}/{len(files_to_get)}] {s.rfilename}  ({size_txt})")
                 try:
                     hf_hub_download(
@@ -244,9 +277,13 @@ class ModelDownloader:
                         local_dir_use_symlinks=False,
                         resume_download=True,
                     )
+                    if bar and size:
+                        bar.update(size)
                 except Exception as e:
                     print(f"[aistudynow]   failed: {e}")
-            print("[aistudynow] Model files downloaded.")
+
+            if bar:
+                bar.close()
         else:
             print(f"[aistudynow] Fallback to snapshot_download for {repo_id} ...")
             snapshot_download(
@@ -258,11 +295,21 @@ class ModelDownloader:
             )
             print("[aistudynow] Snapshot download finished.")
 
+        if not _has_required_weights(model_path):
+            raise RuntimeError(
+                f"Model files incomplete at {model_path}. Missing 'model.safetensors' or the index+shards. "
+                f"Try deleting the folder and rerunning so it redownloads clean."
+            )
+
+        print(f"[aistudynow] Model '{model_name}' ready at {model_path}.")
         return str(model_path)
 
 
 class aistudynow_QwenVL_Advanced:
     CATEGORY = "🧠aistudynow/QwenVL"
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("text",)
+    FUNCTION = "process"
 
     def __init__(self):
         self.model = None
@@ -309,15 +356,18 @@ class aistudynow_QwenVL_Advanced:
                 cc = major + minor / 10
                 if cc < 8.9:
                     raise ValueError(
-                        f"FP8 models require a GPU with Compute Capability 8.9 or higher (e.g., RTX 4090). "
-                        f"Your GPU's capability is {cc}. Please select a non-FP8 model."
+                        f"FP8 models require a GPU with Compute Capability 8.9 or higher (for example RTX 4090). "
+                        f"Your GPU capability is {cc}. Select a non FP8 model."
                     )
 
         model_path = self.downloader.ensure_model_available(model_name)
         adjusted_quantization = check_memory_requirements(model_name, quantization_str, self.device_info)
 
-        quant_config, load_dtype = None, torch.float16
-        if not get_model_info(model_name).get("quantized", False):
+        # choose dtype
+        is_prequant = get_model_info(model_name).get("quantized", False)
+        quant_config, load_dtype = None, (None if is_prequant else torch.float16)
+
+        if not is_prequant:
             if adjusted_quantization == Quantization.Q4_BIT:
                 quant_config = BitsAndBytesConfig(
                     load_in_4bit=True,
@@ -344,7 +394,11 @@ class aistudynow_QwenVL_Advanced:
             load_kwargs["quantization_config"] = quant_config
 
         print(f"Loading model '{model_name}'...")
-        self.model = AutoModelForVision2Seq.from_pretrained(model_path, **load_kwargs).eval()
+        self.model = AutoModelForVision2Seq.from_pretrained(
+            model_path,
+            trust_remote_code=True,
+            **load_kwargs,
+        ).eval()
         self.processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 
@@ -380,11 +434,6 @@ class aistudynow_QwenVL_Advanced:
             "optional": {"image": ("IMAGE",), "video": ("IMAGE",)},
         }
 
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("text",)
-    FUNCTION = "process"
-    CATEGORY = "🧠aistudynow/QwenVL"
-
     @torch.no_grad()
     def process(
         self,
@@ -406,20 +455,25 @@ class aistudynow_QwenVL_Advanced:
     ):
         start_time = time.time()
         try:
+            print("[aistudynow] process(): start")
             torch.manual_seed(seed)
 
+            print(f"[aistudynow] process(): load_model(model={model_name}, quant={quantization}, device={device})")
             self.load_model(model_name, quantization, device)
             effective_device = self.current_device
+            print(f"[aistudynow] process(): device resolved -> {effective_device}")
 
             final_prompt = custom_prompt.strip() if custom_prompt and custom_prompt.strip() else preset_prompt
+            print(f"[aistudynow] process(): final_prompt='{final_prompt[:80]}'")
+
             conversation = [{"role": "user", "content": []}]
 
-            # image input
             if image is not None:
+                print("[aistudynow] process(): got image input")
                 conversation[0]["content"].append({"type": "image", "image": self.image_processor.to_pil(image)})
 
-            # video input
             if video is not None:
+                print("[aistudynow] process(): got video input")
                 video_frames = [Image.fromarray((frame.cpu().numpy() * 255).astype(np.uint8)) for frame in video]
                 if len(video_frames) > frame_count:
                     indices = np.linspace(0, len(video_frames) - 1, frame_count, dtype=int)
@@ -428,9 +482,9 @@ class aistudynow_QwenVL_Advanced:
                     video_frames.append(video_frames[0])
                 conversation[0]["content"].append({"type": "video", "video": video_frames})
 
-            # text
             conversation[0]["content"].append({"type": "text", "text": final_prompt})
 
+            print("[aistudynow] process(): building processor inputs")
             text_prompt = self.processor.apply_chat_template(conversation, tokenize=False, add_generation_prompt=True)
 
             pil_images = [item["image"] for item in conversation[0]["content"] if item["type"] == "image"]
@@ -444,12 +498,16 @@ class aistudynow_QwenVL_Advanced:
             if hasattr(self.tokenizer, "eot_id"):
                 stop_tokens.append(self.tokenizer.eot_id)
 
+            pad_id = self.tokenizer.pad_token_id
+            if pad_id is None:
+                pad_id = self.tokenizer.eos_token_id
+
             gen_kwargs = {
                 "max_new_tokens": max_tokens,
                 "repetition_penalty": repetition_penalty,
                 "num_beams": num_beams,
                 "eos_token_id": stop_tokens,
-                "pad_token_id": self.tokenizer.pad_token_id,
+                "pad_token_id": pad_id,
             }
 
             if num_beams > 1:
@@ -457,16 +515,18 @@ class aistudynow_QwenVL_Advanced:
             else:
                 gen_kwargs.update({"do_sample": True, "temperature": temperature, "top_p": top_p})
 
+            print("[aistudynow] process(): calling model.generate()")
             outputs = self.model.generate(**model_inputs, **gen_kwargs)
             input_len = model_inputs["input_ids"].shape[1]
             text = self.tokenizer.decode(outputs[0, input_len:], skip_special_tokens=True)
 
-            print(f"Generation finished in {time.time() - start_time:.2f} seconds.")
+            print(f"[aistudynow] process(): done in {time.time() - start_time:.2f}s")
             return (text.strip(),)
 
-        except (ValueError, RuntimeError) as e:
+        except Exception as e:
+            print("[aistudynow] process(): ERROR")
+            traceback.print_exc()
             msg = f"ERROR: {e}"
-            print(msg)
             return (msg,)
         finally:
             if not keep_model_loaded:
@@ -477,7 +537,6 @@ class aistudynow_QwenVL(aistudynow_QwenVL_Advanced):
     @classmethod
     def INPUT_TYPES(cls):
         base = aistudynow_QwenVL_Advanced.INPUT_TYPES()
-        # remove advanced controls in the simple node
         for key in ["temperature", "top_p", "num_beams", "repetition_penalty", "frame_count", "device"]:
             base["required"].pop(key, None)
         return base
@@ -515,12 +574,39 @@ class aistudynow_QwenVL(aistudynow_QwenVL_Advanced):
         )
 
 
+class aistudynow_SaveText:
+    CATEGORY = "🧠aistudynow/Utility"
+    RETURN_TYPES = ()
+    FUNCTION = "save"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "text": ("STRING",),
+                "filename": ("STRING", {"default": "qwenvl_output.txt"}),
+            }
+        }
+
+    def save(self, text, filename):
+        try:
+            out_dir = Path(folder_paths.get_output_directory())
+            out_path = out_dir / filename
+            out_path.write_text(text if isinstance(text, str) else str(text), encoding="utf-8")
+            print(f"[aistudynow] Saved text to: {out_path}")
+        except Exception as e:
+            print(f"[aistudynow] SaveText error: {e}")
+        return tuple()
+
+
 NODE_CLASS_MAPPINGS = {
     "aistudynow_QwenVL": aistudynow_QwenVL,
     "aistudynow_QwenVL_Advanced": aistudynow_QwenVL_Advanced,
+    "aistudynow_SaveText": aistudynow_SaveText,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "aistudynow_QwenVL": "QwenVL",
     "aistudynow_QwenVL_Advanced": "QwenVL (Advanced)",
+    "aistudynow_SaveText": "aistudynow Save Text",
 }
