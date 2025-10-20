@@ -1,7 +1,8 @@
 [project]
-name = "aistudynow-qwenvl"                 # package name (lowercase, hyphens)
-version = "1.1.0"                           # bump on every publish: 1.0.1, 1.1.0, etc.
+name = "aistudynow-qwenvl"
+version = "1.1.0"
 description = "ComfyUI nodes for QwenVL (Qwen2.5-VL / Qwen3-VL): image caption, OCR, boxes, video summary."
+readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
 dynamic = ["dependencies"]
@@ -14,8 +15,16 @@ Repository = "https://github.com/aistudynow/ComfyUI-QwenVL"
 "Bug Tracker" = "https://github.com/aistudynow/ComfyUI-QwenVL/issues"
 
 [tool.comfy]
-PublisherId = "aistudynow"                  # your Registry publisher id
-DisplayName = "ComfyUI-QwenVL"              # shown on registry page
+PublisherId = "aistudynow"
+PackageId  = "ComfyUI-QwenVL"
+DisplayName = "ComfyUI-QwenVL"
+Description = "Qwen-VL custom nodes for image and video understanding with auto-download and low VRAM options."
+Repository = "https://github.com/aistudynow/ComfyUI-QwenVL"
 Icon = "https://raw.githubusercontent.com/aistudynow/ComfyUI-QwenVL/main/icon.png"
 # Banner = "https://raw.githubusercontent.com/aistudynow/ComfyUI-QwenVL/main/banner.png"
-# requires-comfyui = ">=1.0.0"
+requires-comfyui = ">=0.3.0"
+
+[tool.comfy.nodes]
+aistudynow_QwenVL = "aistudynow_QwenVL:aistudynow_QwenVL"
+aistudynow_QwenVL_Advanced = "aistudynow_QwenVL:aistudynow_QwenVL_Advanced"
+aistudynow_SaveText = "aistudynow_QwenVL:aistudynow_SaveText"
