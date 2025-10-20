@@ -1,6 +1,10 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
-name = "aistudynow-qwenvl"
-version = "1.2.0"
+name = "aistudynow-qwenvl"                   # stable node id in the registry
+version = "1.2.1"                            # bump this on every publish
 description = "ComfyUI nodes for QwenVL (Qwen2.5-VL / Qwen3-VL): image caption, OCR, boxes, video summary."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -16,12 +20,11 @@ Repository = "https://github.com/aistudynow/ComfyUI-QwenVL"
 
 [tool.comfy]
 PublisherId = "aistudynow"
-PackageId  = "ComfyUI-QwenVL"
+PackageId = "ComfyUI-QwenVL"                 # keep if no package conflict; if conflict, make it unique (see note below)
 DisplayName = "ComfyUI-QwenVL"
 Description = "Qwen-VL custom nodes for image and video understanding with auto-download and low VRAM options."
 Repository = "https://github.com/aistudynow/ComfyUI-QwenVL"
 Icon = "https://raw.githubusercontent.com/aistudynow/ComfyUI-QwenVL/main/icon.png"
-# Banner = "https://raw.githubusercontent.com/aistudynow/ComfyUI-QwenVL/main/banner.png"
 requires-comfyui = ">=0.3.0"
 
 [tool.comfy.nodes]
