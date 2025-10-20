@@ -1,6 +1,6 @@
 [project]
 name = "aistudynow-qwenvl"
-version = "1.1.0"
+version = "1.2.0"
 description = "ComfyUI nodes for QwenVL (Qwen2.5-VL / Qwen3-VL): image caption, OCR, boxes, video summary."
 readme = "README.md"
 license = { file = "LICENSE" }
