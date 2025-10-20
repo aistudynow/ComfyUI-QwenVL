@@ -1,0 +1,112 @@
+{
+    "_version": "1.0.0",
+    "_default_model": "Qwen3-VL-4B-Instruct",
+
+    "_preset_prompts": [
+        "Describe this image in detail.",
+        "Describe this video in detail.",
+        "Summarize the key events in this video.",
+        "Generate 5 descriptive keywords for this content.",
+        "Create a detailed text-to-image prompt from this image.",
+        "Generate a detailed Stable Diffusion prompt that includes subject, background, lighting, and style.",
+        "Analyze the main subject's emotional state or atmosphere.",
+        "Infer what might happen next based on the scene.",
+        "Write a short story inspired by this image.",
+        "Write a short poem inspired by this image.",
+        "Create a catchy advertising slogan for this image.",
+        "[For Batch Images] Describe each image individually."
+    ],
+
+    "Qwen3-VL-4B-Instruct": {
+        "repo_id": "Qwen/Qwen3-VL-4B-Instruct",
+        "description": "Fast, general-purpose visual instruction model (4B).",
+        "category": "Qwen3",
+        "default": true,
+        "quantized": false,
+        "vram_requirement": {
+            "full": 6.0,
+            "8bit": 3.5,
+            "4bit": 2.0
+        }
+    },
+    "Qwen3-VL-4B-Thinking": {
+        "repo_id": "Qwen/Qwen3-VL-4B-Thinking",
+        "description": "Reasoning-focused variant for longer text and analysis.",
+        "category": "Qwen3",
+        "default": false,
+        "quantized": false,
+        "vram_requirement": {
+            "full": 6.0,
+            "8bit": 3.5,
+            "4bit": 2.0
+        }
+    },
+    "Qwen3-VL-4B-Thinking-Abliterated_Nsfw": {
+        "repo_id": "prithivMLmods/Qwen3-VL-4B-Thinking-abliterated",
+        "display_name": "Qwen3-VL-4B-Thinking (Abliterated NSFW)",
+        "category": "Experimental",
+        "default": false,
+        "quantized": false,
+        "vram_requirement": {
+            "full": 6.0,
+            "8bit": 3.5,
+            "4bit": 2.0
+        }
+    },
+    "Qwen3-VL-4B-Instruct-FP8": {
+        "repo_id": "Qwen/Qwen3-VL-4B-Instruct-FP8",
+        "description": "FP8 quantized version for Ada/Hopper GPUs.",
+        "category": "Quantized",
+        "default": false,
+        "quantized": true,
+        "vram_requirement": {
+            "full": 2.5
+        }
+    },
+    "Qwen3-VL-8B-Instruct": {
+        "repo_id": "Qwen/Qwen3-VL-8B-Instruct",
+        "description": "Larger visual model with better reasoning and fidelity.",
+        "category": "Qwen3",
+        "default": false,
+        "quantized": false,
+        "vram_requirement": {
+            "full": 12.0,
+            "8bit": 7.0,
+            "4bit": 4.5
+        }
+    },
+    "Qwen3-VL-8B-Thinking-FP8": {
+        "repo_id": "Qwen/Qwen3-VL-8B-Thinking-FP8",
+        "description": "Quantized reasoning model optimized for speed.",
+        "category": "Quantized",
+        "default": false,
+        "quantized": true,
+        "vram_requirement": {
+            "full": 2.5
+        }
+    },
+    "Qwen2.5-VL-3B-Instruct": {
+        "repo_id": "Qwen/Qwen2.5-VL-3B-Instruct",
+        "description": "Lightweight model for low VRAM systems.",
+        "category": "Qwen2.5",
+        "default": false,
+        "quantized": false,
+        "vram_requirement": {
+            "full": 6.0,
+            "8bit": 3.5,
+            "4bit": 2.0
+        }
+    },
+    "Qwen2.5-VL-7B-Instruct": {
+        "repo_id": "Qwen/Qwen2.5-VL-7B-Instruct",
+        "description": "High-quality 7B model for 12–16GB GPUs.",
+        "category": "Qwen2.5",
+        "default": false,
+        "quantized": false,
+        "vram_requirement": {
+            "full": 15.0,
+            "8bit": 8.5,
+            "4bit": 5.0
+        }
+    }
+}
