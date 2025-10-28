@@ -1,5 +1,5 @@
 {
-    "_version": "1.0.0",
+    "_version": "1.2.2",
     "_default_model": "Qwen3-VL-4B-Instruct",
 
     "_preset_prompts": [
@@ -110,3 +110,4 @@
         }
     }
 }
+
