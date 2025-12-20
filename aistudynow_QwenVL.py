@@ -195,6 +195,63 @@ class ModelDownloader:
         self.configs = configs
         self.models_dir = Path(folder_paths.models_dir) / "LLM" / "Qwen-VL"
         self.models_dir.mkdir(parents=True, exist_ok=True)
+		
+		
+		
+		
+		
+		
+		
+		
+		
+    @staticmethod
+    def _infer_model_type(repo_id: str) -> str | None:
+        repo_lower = repo_id.lower()
+
+        if "qwen3-vl" in repo_lower:
+            return "qwen3_vl"
+        if "qwen2.5-vl" in repo_lower:
+            return "qwen2_5_vl"
+        return None
+
+    def _ensure_model_type(self, model_path: Path, repo_id: str):
+        config_file = model_path / "config.json"
+        if not config_file.exists():
+            print(f"[aistudynow] Warning: config.json missing for {repo_id} in {model_path}")
+            return
+
+        try:
+            config_data = json.loads(config_file.read_text(encoding="utf-8"))
+        except Exception as e:
+            print(f"[aistudynow] Warning: failed to read config.json for {repo_id}: {e}")
+            return
+
+        if config_data.get("model_type"):
+            return
+
+        inferred_type = self._infer_model_type(repo_id)
+        if inferred_type is None:
+            print(f"[aistudynow] Warning: Unable to infer model_type for {repo_id}. Please update config.json manually.")
+            return
+
+        config_data["model_type"] = inferred_type
+        try:
+            config_file.write_text(json.dumps(config_data, indent=2), encoding="utf-8")
+            print(f"[aistudynow] Added missing model_type='{inferred_type}' to {config_file}")
+        except Exception as e:
+            print(f"[aistudynow] Warning: failed to update config.json for {repo_id}: {e}")
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
+		
 
     def _print_transfer_hint(self):
         if not os.environ.get("HF_HUB_ENABLE_HF_TRANSFER", "").strip():
@@ -300,6 +357,8 @@ class ModelDownloader:
                 f"Model files incomplete at {model_path}. Missing 'model.safetensors' or the index+shards. "
                 f"Try deleting the folder and rerunning so it redownloads clean."
             )
+			
+			self._ensure_model_type(model_path, repo_id)
 
         print(f"[aistudynow] Model '{model_name}' ready at {model_path}.")
         return str(model_path)
