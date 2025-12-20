@@ -180,6 +180,73 @@ def _has_required_weights(model_path: Path) -> bool:
         if name.startswith("model-") and name.endswith(".safetensors"):
             return True
     return False
+	
+	
+	
+	
+	
+	
+	def _normalize_name(name: str) -> str:
+    return name.lower().replace("_", "-")
+
+
+def discover_custom_qwen_text_encoders() -> list[str]:
+    try:
+        text_encoder_files = folder_paths.get_filename_list("text_encoders")
+    except Exception:
+        return []
+
+    candidates: list[str] = []
+    for file in text_encoder_files:
+        if file.lower().endswith(".safetensors") and "qwen" in file.lower():
+            candidates.append(f"text_encoders/{Path(file).stem}")
+    return sorted(set(candidates))
+
+
+def infer_base_model_name(custom_model_name: str) -> str | None:
+    raw_name = custom_model_name.replace("text_encoders/", "")
+    normalized = _normalize_name(raw_name)
+
+    for base_name, info in MODEL_CONFIGS.items():
+        if base_name.startswith("_"):
+            continue
+        base_normalized = _normalize_name(base_name)
+        repo_normalized = _normalize_name(info.get("repo_id", ""))
+        if base_normalized in normalized or repo_normalized in normalized:
+            return base_name
+
+    if "qwen2.5-vl" in normalized:
+        candidate = "Qwen2.5-VL-7B-Instruct" if "7b" in normalized else "Qwen2.5-VL-3B-Instruct"
+        return candidate if candidate in MODEL_CONFIGS else None
+
+    if "qwen3-vl" in normalized:
+        if "8b" in normalized:
+            candidate = "Qwen3-VL-8B-Instruct"
+        else:
+            candidate = MODEL_CONFIGS.get("_default_model", "Qwen3-VL-4B-Instruct")
+        return candidate if candidate in MODEL_CONFIGS else None
+
+    return None
+
+
+def resolve_custom_weight_path(custom_model_name: str) -> str:
+    model_name = custom_model_name.replace("text_encoders/", "")
+    try:
+        full_path = folder_paths.get_full_path("text_encoders", f"{model_name}.safetensors")
+    except Exception:
+        return ""
+
+    if full_path and os.path.exists(full_path):
+        return full_path
+    return ""
+	
+	
+	
+	
+	
+	
+	
+	
 
 
 class ImageProcessor:
@@ -253,21 +320,22 @@ class ModelDownloader:
 		
 		
 
-    def _print_transfer_hint(self):
+     def _print_transfer_hint(self):
         if not os.environ.get("HF_HUB_ENABLE_HF_TRANSFER", "").strip():
             print("[aistudynow] Tip: enable faster downloads by installing hf_transfer and setting HF_HUB_ENABLE_HF_TRANSFER=1")
 
-    def ensure_model_available(self, model_name: str) -> str:
+    def ensure_model_available(self, model_name: str, repo_id_override: str | None = None) -> str:
         model_info = self.configs.get(model_name)
-        if not model_info:
-            raise ValueError(f"Model '{model_name}' not found in configuration.")
+        repo_id = repo_id_override or (model_info["repo_id"] if model_info else None)
+        if not repo_id:
+            raise ValueError(f"Model '{model_name}' not found in configuration and no repo_id override provided.")
 
-        repo_id = model_info["repo_id"]
         model_folder_name = repo_id.split("/")[-1]
         model_path = self.models_dir / model_folder_name
         model_path.mkdir(parents=True, exist_ok=True)
 
         if _has_required_weights(model_path):
+            self._ensure_model_type(model_path, repo_id)
             print(f"[aistudynow] Model '{model_name}' ready at {model_path}.")
             return str(model_path)
 
@@ -358,7 +426,7 @@ class ModelDownloader:
                 f"Try deleting the folder and rerunning so it redownloads clean."
             )
 			
-			self._ensure_model_type(model_path, repo_id)
+		self._ensure_model_type(model_path, repo_id)
 
         print(f"[aistudynow] Model '{model_name}' ready at {model_path}.")
         return str(model_path)
@@ -377,6 +445,7 @@ class aistudynow_QwenVL_Advanced:
         self.current_model_name = None
         self.current_quantization = None
         self.current_device = None
+        self.current_weights_path = None
         self.device_info = get_device_info()
         self.downloader = ModelDownloader(MODEL_CONFIGS)
         self.image_processor = ImageProcessor()
@@ -391,25 +460,48 @@ class aistudynow_QwenVL_Advanced:
             del self.model, self.processor, self.tokenizer
             self.model = self.processor = self.tokenizer = None
             self.current_model_name = self.current_quantization = self.current_device = None
+            self.current_weights_path = None
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
     def load_model(self, model_name: str, quantization_str: str, device: str = "auto"):
         effective_device = self.device_info["recommended_device"] if device == "auto" else device
+		
+		
+		custom_weights_path = None
+        base_model_name = model_name
+        if model_name.startswith("text_encoders/"):
+            base_model_name = infer_base_model_name(model_name)
+            if not base_model_name:
+                raise ValueError(
+                    f"Unsupported custom model '{model_name}'. "
+                    "File name must include a known QwenVL base model such as Qwen2.5-VL-3B or Qwen2.5-VL-7B."
+                )
+            custom_weights_path = resolve_custom_weight_path(model_name)
+            if not custom_weights_path:
+                raise FileNotFoundError(
+                    f"Custom weights for '{model_name}' were not found in the text_encoders folder. "
+                    "Ensure the .safetensors file exists and matches the selected name."
+                )
+            print(f"[aistudynow] Resolved custom weights '{model_name}' -> base model '{base_model_name}'.")
+
+        base_model_info = get_model_info(base_model_name)
+        if not base_model_info:
+            raise ValueError(f"Model '{base_model_name}' not found in configuration.")
 
         if (
             self.model is not None
             and self.current_model_name == model_name
             and self.current_quantization == quantization_str
             and self.current_device == effective_device
+            and self.current_weights_path == custom_weights_path
         ):
             return
 
         self.clear_model_resources()
 
-        model_info = get_model_info(model_name)
-        if model_info.get("quantized"):
+         if base_model_info.get("quantized"):
             if self.device_info["gpu"]["available"]:
                 major, minor = torch.cuda.get_device_capability()
                 cc = major + minor / 10
@@ -419,12 +511,15 @@ class aistudynow_QwenVL_Advanced:
                         f"Your GPU capability is {cc}. Select a non FP8 model."
                     )
 
-        model_path = self.downloader.ensure_model_available(model_name)
-        adjusted_quantization = check_memory_requirements(model_name, quantization_str, self.device_info)
+        model_path = self.downloader.ensure_model_available(
+            base_model_name, repo_id_override=base_model_info.get("repo_id")
+        )
+        adjusted_quantization = check_memory_requirements(base_model_name, quantization_str, self.device_info)
 
         # choose dtype
-        is_prequant = get_model_info(model_name).get("quantized", False)
+        is_prequant = base_model_info.get("quantized", False)
         quant_config, load_dtype = None, (None if is_prequant else torch.float16)
+
 
         if not is_prequant:
             if adjusted_quantization == Quantization.Q4_BIT:
@@ -460,23 +555,44 @@ class aistudynow_QwenVL_Advanced:
         ).eval()
         self.processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+		
+		
+		 if custom_weights_path:
+            print(f"[aistudynow] Applying custom weights from {custom_weights_path}")
+            try:
+                from safetensors.torch import load_file
+            except Exception as exc:
+                raise RuntimeError("Failed to import safetensors for loading custom weights.") from exc
+
+            custom_state = load_file(custom_weights_path)
+            missing_keys, unexpected_keys = self.model.load_state_dict(custom_state, strict=False)
+            if missing_keys:
+                print(f"[aistudynow] Warning: missing {len(missing_keys)} keys when loading custom weights.")
+            if unexpected_keys:
+                print(f"[aistudynow] Warning: {len(unexpected_keys)} unexpected keys in custom weights.")
+
+        self.current_model_name = model_name
 
         self.current_model_name = model_name
         self.current_quantization = quantization_str
         self.current_device = effective_device
         print("Model loaded successfully.")
 
-    @classmethod
+     @classmethod
     def INPUT_TYPES(cls):
         model_names = [name for name in MODEL_CONFIGS.keys() if not name.startswith("_")]
         default_model = next(
             (name for name in model_names if MODEL_CONFIGS[name].get("default")), model_names[0] if model_names else ""
         )
+        custom_models = discover_custom_qwen_text_encoders()
+        available_models = model_names + [m for m in custom_models if m not in model_names]
+        if not default_model and available_models:
+            default_model = available_models[0]
         preset_prompts = MODEL_CONFIGS.get("_preset_prompts", ["Describe this image in detail."])
 
         return {
             "required": {
-                "model_name": (model_names, {"default": default_model}),
+                "model_name": (available_models, {"default": default_model}),
                 "quantization": (list(Quantization.get_values()), {"default": Quantization.Q8_BIT}),
                 "preset_prompt": (preset_prompts, {"default": preset_prompts[0]}),
                 "custom_prompt": ("STRING", {"default": "", "multiline": True, "placeholder": "Custom prompt"}),
