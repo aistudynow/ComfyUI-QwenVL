@@ -141,15 +141,35 @@ def check_memory_requirements(model_name: str, quantization: str, device_info: d
     return quantization
 
 
-def check_flash_attention() -> bool:
+def flash_attn_available() -> bool:
+    if not torch.cuda.is_available():
+        return False
     try:
         import flash_attn  # noqa: F401
-        if torch.cuda.is_available():
-            major, _ = torch.cuda.get_device_capability()
-            return major >= 8
     except Exception:
         return False
-    return False
+    major, _ = torch.cuda.get_device_capability()
+    return major >= 8
+
+
+def resolve_attention_mode(mode: str) -> str:
+    # Handle legacy boolean values if they slip through
+    if str(mode) == "True":
+        return "auto" 
+    if str(mode) == "False":
+        return "sdpa"
+        
+    if mode == "sdpa":
+        return "sdpa"
+    if mode == "flash_attention_2":
+        if flash_attn_available():
+            return "flash_attention_2"
+        print("[QwenVL] Flash-Attn forced but unavailable, falling back to SDPA")
+        return "sdpa"
+    if flash_attn_available():
+        return "flash_attention_2"
+    print("[QwenVL] Flash-Attn auto mode: dependency not ready, using SDPA")
+    return "sdpa"
 
 
 def _human_bytes(n_bytes: int) -> str:
@@ -180,13 +200,9 @@ def _has_required_weights(model_path: Path) -> bool:
         if name.startswith("model-") and name.endswith(".safetensors"):
             return True
     return False
-	
-	
-	
-	
-	
-	
-	def _normalize_name(name: str) -> str:
+
+
+def _normalize_name(name: str) -> str:
     return name.lower().replace("_", "-")
 
 
@@ -239,14 +255,6 @@ def resolve_custom_weight_path(custom_model_name: str) -> str:
     if full_path and os.path.exists(full_path):
         return full_path
     return ""
-	
-	
-	
-	
-	
-	
-	
-	
 
 
 class ImageProcessor:
@@ -262,15 +270,7 @@ class ModelDownloader:
         self.configs = configs
         self.models_dir = Path(folder_paths.models_dir) / "LLM" / "Qwen-VL"
         self.models_dir.mkdir(parents=True, exist_ok=True)
-		
-		
-		
-		
-		
-		
-		
-		
-		
+
     @staticmethod
     def _infer_model_type(repo_id: str) -> str | None:
         repo_lower = repo_id.lower()
@@ -298,7 +298,9 @@ class ModelDownloader:
 
         inferred_type = self._infer_model_type(repo_id)
         if inferred_type is None:
-            print(f"[aistudynow] Warning: Unable to infer model_type for {repo_id}. Please update config.json manually.")
+            print(
+                f"[aistudynow] Warning: Unable to infer model_type for {repo_id}. Please update config.json manually."
+            )
             return
 
         config_data["model_type"] = inferred_type
@@ -307,22 +309,13 @@ class ModelDownloader:
             print(f"[aistudynow] Added missing model_type='{inferred_type}' to {config_file}")
         except Exception as e:
             print(f"[aistudynow] Warning: failed to update config.json for {repo_id}: {e}")
-		
-		
-		
-		
-		
-		
-		
-		
-		
-		
-		
-		
 
-     def _print_transfer_hint(self):
+    def _print_transfer_hint(self):
         if not os.environ.get("HF_HUB_ENABLE_HF_TRANSFER", "").strip():
-            print("[aistudynow] Tip: enable faster downloads by installing hf_transfer and setting HF_HUB_ENABLE_HF_TRANSFER=1")
+            print(
+                "[aistudynow] Tip: enable faster downloads by installing hf_transfer and setting "
+                "HF_HUB_ENABLE_HF_TRANSFER=1"
+            )
 
     def ensure_model_available(self, model_name: str, repo_id_override: str | None = None) -> str:
         model_info = self.configs.get(model_name)
@@ -425,8 +418,8 @@ class ModelDownloader:
                 f"Model files incomplete at {model_path}. Missing 'model.safetensors' or the index+shards. "
                 f"Try deleting the folder and rerunning so it redownloads clean."
             )
-			
-		self._ensure_model_type(model_path, repo_id)
+
+        self._ensure_model_type(model_path, repo_id)
 
         print(f"[aistudynow] Model '{model_name}' ready at {model_path}.")
         return str(model_path)
@@ -436,6 +429,7 @@ class aistudynow_QwenVL_Advanced:
     CATEGORY = "🧠aistudynow/QwenVL"
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("text",)
+    OUTPUT_NODE = True
     FUNCTION = "process"
 
     def __init__(self):
@@ -446,6 +440,7 @@ class aistudynow_QwenVL_Advanced:
         self.current_quantization = None
         self.current_device = None
         self.current_weights_path = None
+        self.current_attention_mode = None
         self.device_info = get_device_info()
         self.downloader = ModelDownloader(MODEL_CONFIGS)
         self.image_processor = ImageProcessor()
@@ -461,15 +456,21 @@ class aistudynow_QwenVL_Advanced:
             self.model = self.processor = self.tokenizer = None
             self.current_model_name = self.current_quantization = self.current_device = None
             self.current_weights_path = None
+            self.current_attention_mode = None
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-    def load_model(self, model_name: str, quantization_str: str, device: str = "auto"):
+    def load_model(
+        self,
+        model_name: str,
+        quantization_str: str,
+        device: str = "auto",
+        attention_mode: str = "auto",
+    ):
         effective_device = self.device_info["recommended_device"] if device == "auto" else device
-		
-		
-		custom_weights_path = None
+
+        custom_weights_path = None
         base_model_name = model_name
         if model_name.startswith("text_encoders/"):
             base_model_name = infer_base_model_name(model_name)
@@ -490,18 +491,21 @@ class aistudynow_QwenVL_Advanced:
         if not base_model_info:
             raise ValueError(f"Model '{base_model_name}' not found in configuration.")
 
+        attn_impl = resolve_attention_mode(attention_mode)
+
         if (
             self.model is not None
             and self.current_model_name == model_name
             and self.current_quantization == quantization_str
             and self.current_device == effective_device
             and self.current_weights_path == custom_weights_path
+            and self.current_attention_mode == attn_impl
         ):
             return
 
         self.clear_model_resources()
 
-         if base_model_info.get("quantized"):
+        if base_model_info.get("quantized"):
             if self.device_info["gpu"]["available"]:
                 major, minor = torch.cuda.get_device_capability()
                 cc = major + minor / 10
@@ -520,7 +524,6 @@ class aistudynow_QwenVL_Advanced:
         is_prequant = base_model_info.get("quantized", False)
         quant_config, load_dtype = None, (None if is_prequant else torch.float16)
 
-
         if not is_prequant:
             if adjusted_quantization == Quantization.Q4_BIT:
                 quant_config = BitsAndBytesConfig(
@@ -536,18 +539,22 @@ class aistudynow_QwenVL_Advanced:
 
         device_map = "auto"
         if effective_device == "cuda" and torch.cuda.is_available():
-            device_map = {"": 0}
+            # Uses the current active GPU instead of forcing GPU 0
+            device_map = {"": torch.cuda.current_device()}
+        elif effective_device == "cpu":
+            device_map = "cpu"
+            load_dtype = torch.float32 # CPUs generally prefer fp32
 
         load_kwargs = {
             "device_map": device_map,
             "dtype": load_dtype,
-            "attn_implementation": "flash_attention_2" if check_flash_attention() else "sdpa",
+            "attn_implementation": attn_impl,
             "use_safetensors": True,
         }
         if quant_config:
             load_kwargs["quantization_config"] = quant_config
 
-        print(f"Loading model '{model_name}'...")
+        print(f"Loading model '{model_name}' with attention='{attn_impl}'...")
         self.model = AutoModelForVision2Seq.from_pretrained(
             model_path,
             trust_remote_code=True,
@@ -555,9 +562,8 @@ class aistudynow_QwenVL_Advanced:
         ).eval()
         self.processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-		
-		
-		 if custom_weights_path:
+
+        if custom_weights_path:
             print(f"[aistudynow] Applying custom weights from {custom_weights_path}")
             try:
                 from safetensors.torch import load_file
@@ -572,13 +578,12 @@ class aistudynow_QwenVL_Advanced:
                 print(f"[aistudynow] Warning: {len(unexpected_keys)} unexpected keys in custom weights.")
 
         self.current_model_name = model_name
-
-        self.current_model_name = model_name
         self.current_quantization = quantization_str
         self.current_device = effective_device
+        self.current_attention_mode = attn_impl
         print("Model loaded successfully.")
 
-     @classmethod
+    @classmethod
     def INPUT_TYPES(cls):
         model_names = [name for name in MODEL_CONFIGS.keys() if not name.startswith("_")]
         default_model = next(
@@ -590,6 +595,7 @@ class aistudynow_QwenVL_Advanced:
             default_model = available_models[0]
         preset_prompts = MODEL_CONFIGS.get("_preset_prompts", ["Describe this image in detail."])
 
+        # MOVED ATTENTION_MODE to the END to prevent "Seed: fixed" errors on old nodes
         return {
             "required": {
                 "model_name": (available_models, {"default": default_model}),
@@ -605,6 +611,7 @@ class aistudynow_QwenVL_Advanced:
                 "device": (["auto", "cuda", "cpu", "mps"], {"default": "auto"}),
                 "keep_model_loaded": ("BOOLEAN", {"default": True}),
                 "seed": ("INT", {"default": 1, "min": 1, "max": 0xFFFFFFFFFFFFFFFF}),
+                "attention_mode": (["auto", "sdpa", "flash_attention_2"], {"default": "auto"}),
             },
             "optional": {"image": ("IMAGE",), "video": ("IMAGE",)},
         }
@@ -622,19 +629,23 @@ class aistudynow_QwenVL_Advanced:
         num_beams,
         frame_count,
         device,
+        keep_model_loaded,
         seed,
+        attention_mode, # Now last argument
         custom_prompt="",
         image=None,
         video=None,
-        keep_model_loaded=True,
     ):
         start_time = time.time()
         try:
             print("[aistudynow] process(): start")
             torch.manual_seed(seed)
 
-            print(f"[aistudynow] process(): load_model(model={model_name}, quant={quantization}, device={device})")
-            self.load_model(model_name, quantization, device)
+            print(
+                "[aistudynow] process(): load_model("
+                f"model={model_name}, quant={quantization}, device={device}, attention={attention_mode})"
+            )
+            self.load_model(model_name, quantization, device, attention_mode)
             effective_device = self.current_device
             print(f"[aistudynow] process(): device resolved -> {effective_device}")
 
@@ -696,7 +707,10 @@ class aistudynow_QwenVL_Advanced:
             text = self.tokenizer.decode(outputs[0, input_len:], skip_special_tokens=True)
 
             print(f"[aistudynow] process(): done in {time.time() - start_time:.2f}s")
-            return (text.strip(),)
+            final_text = text.strip()
+            
+            # This dictionary structure tells ComfyUI to show the text on the node
+            return {"ui": {"text": [final_text]}, "result": (final_text,)}
 
         except Exception as e:
             print("[aistudynow] process(): ERROR")
@@ -725,10 +739,11 @@ class aistudynow_QwenVL(aistudynow_QwenVL_Advanced):
         preset_prompt,
         max_tokens,
         seed,
+        attention_mode,
+        keep_model_loaded, # Must match arg order in base
         custom_prompt="",
         image=None,
         video=None,
-        keep_model_loaded=True,
     ):
         return self.process(
             model_name=model_name,
@@ -741,6 +756,7 @@ class aistudynow_QwenVL(aistudynow_QwenVL_Advanced):
             num_beams=1,
             frame_count=16,
             device="auto",
+            attention_mode=attention_mode,
             custom_prompt=custom_prompt,
             image=image,
             video=video,
