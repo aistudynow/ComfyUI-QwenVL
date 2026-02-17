@@ -3,8 +3,9 @@
 # ----------------------------
 # Core ML libraries
 torch>=2.1.0
-transformers>=4.40.0
+transformers>=4.57.0
 huggingface-hub>=0.22.2
+hf_xet>=1.1.5
 accelerate>=0.27.0
 bitsandbytes>=0.42.0
 
@@ -16,6 +17,8 @@ psutil>=5.9.5
 
 # Optional high-performance attention
 flash-attn>=2.3.6; platform_system == "Linux" and platform_machine == "x86_64"
+# Optional SageAttention backend for compatible NVIDIA GPUs
+# sageattention>=1.0.0; platform_system == "Linux" and platform_machine == "x86_64"
 
 # GGUF + local LLM support (for quantized models)
 llama-cpp-python[server]>=0.2.78
