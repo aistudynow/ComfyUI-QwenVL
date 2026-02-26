@@ -195,7 +195,7 @@ def check_memory_requirements(
 
     required_mem = base_memory * (1.5 if use_cpu_mps else 1.0)
     
-    available_mem = device_info.get("ram_total", 0.0) if use_cpu_mps else device_info.get("vram_total", 0.0)
+    available_mem = device_info.get("system_memory", {}).get("available", 0.0) if use_cpu_mps else device_info.get("gpu", {}).get("free_memory", 0.0)
     if not isinstance(available_mem, (float, int)):
         available_mem = 0.0
     mem_type = "System RAM" if use_cpu_mps else "GPU VRAM"
