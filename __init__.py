@@ -2,12 +2,13 @@
 import importlib.util
 import os
 import sys
+from typing import Any, Dict
 
 current_dir = os.path.dirname(__file__)
 sys.path.insert(0, current_dir)
 
-NODE_CLASS_MAPPINGS = {}
-NODE_DISPLAY_NAME_MAPPINGS = {}
+NODE_CLASS_MAPPINGS: Dict[str, Any] = {}
+NODE_DISPLAY_NAME_MAPPINGS: Dict[str, str] = {}
 
 def load_modules_from_directory(directory):
     for file in os.listdir(directory):
@@ -20,9 +21,12 @@ def load_modules_from_directory(directory):
         file_path = os.path.join(directory, file)
         try:
             spec = importlib.util.spec_from_file_location(module_name, file_path)
-            module = importlib.util.module_from_spec(spec)
+            if spec is None or spec.loader is None:
+                print(f"[aistudynow] Error loading module {module_name}: Spec or loader is None")
+                continue
+            module = importlib.util.module_from_spec(spec)  # type: ignore
             sys.modules[module_name] = module
-            spec.loader.exec_module(module)
+            spec.loader.exec_module(module)  # type: ignore
 
             if hasattr(module, "NODE_CLASS_MAPPINGS"):
                 NODE_CLASS_MAPPINGS.update(module.NODE_CLASS_MAPPINGS)
@@ -36,9 +40,9 @@ def load_modules_from_directory(directory):
 load_modules_from_directory(current_dir)
 
 NODE_CLASS_MAPPINGS = dict(
-    sorted(NODE_CLASS_MAPPINGS.items(), key=lambda x: NODE_DISPLAY_NAME_MAPPINGS.get(x[0], x[0]))
+    sorted(NODE_CLASS_MAPPINGS.items(), key=lambda x: str(NODE_DISPLAY_NAME_MAPPINGS.get(x[0], x[0])))
 )
-NODE_DISPLAY_NAME_MAPPINGS = dict(sorted(NODE_DISPLAY_NAME_MAPPINGS.items(), key=lambda x: x[1]))
+NODE_DISPLAY_NAME_MAPPINGS = dict(sorted(NODE_DISPLAY_NAME_MAPPINGS.items(), key=lambda x: str(x[1])))
 
 WEB_DIRECTORY = "./web"
 

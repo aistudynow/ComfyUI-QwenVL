@@ -7,10 +7,10 @@
 import json
 from pathlib import Path
 
-import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+import torch  # type: ignore
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig  # type: ignore
 
-from aistudynow_QwenVL_HF import (
+from aistudynow_QwenVL_HF import (  # type: ignore
     ATTENTION_MODES,
     HF_TEXT_MODELS,
     HF_VL_MODELS,
@@ -68,7 +68,7 @@ class aistudynow_QwenVL_PromptEnhancer(QwenVLBase):
         super().__init__()
         self.text_model = None
         self.text_tokenizer = None
-        self.text_signature = None
+        self.text_signature: tuple | None = None
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -225,8 +225,9 @@ class aistudynow_QwenVL_PromptEnhancer(QwenVLBase):
         print(f"[QwenVL] Loading text model {model_name} ({quantization})")
         self.text_tokenizer = AutoTokenizer.from_pretrained(repo_id, trust_remote_code=True)
         self.text_model = AutoModelForCausalLM.from_pretrained(repo_id, trust_remote_code=True, **load_kwargs).eval()
-        self.text_model.to(device)
-        self.text_signature = signature
+        if hasattr(self.text_model, "to"):
+            self.text_model.to(device)  # type: ignore
+        self.text_signature = signature  # type: ignore
 
     def _invoke_text(
         self,

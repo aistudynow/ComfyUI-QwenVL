@@ -16,12 +16,12 @@ import re
 import gc
 from pathlib import Path
 
-import torch
-from huggingface_hub import hf_hub_download, snapshot_download
-from llama_cpp import Llama
+import torch  # type: ignore
+from huggingface_hub import hf_hub_download, snapshot_download  # type: ignore
+from llama_cpp import Llama  # type: ignore
 
-import folder_paths
-from aistudynow_OutputCleaner import OutputCleanConfig, clean_model_output
+import folder_paths  # type: ignore
+from aistudynow_OutputCleaner import OutputCleanConfig, clean_model_output  # type: ignore
 
 NODE_DIR = Path(__file__).parent
 GGUF_CONFIG_PATH = NODE_DIR / "gguf_models.json"
@@ -45,7 +45,8 @@ def load_prompt_config():
 
 
 PROMPT_CONFIG = load_prompt_config()
-STYLES = PROMPT_CONFIG.get("styles", {})
+styles_raw = PROMPT_CONFIG.get("styles")
+STYLES = styles_raw if isinstance(styles_raw, dict) else {}
 
 
 def _safe_dirname(value: str) -> str:
@@ -182,7 +183,10 @@ class aistudynow_QwenVL_GGUF_PromptEnhancer:
                     if display in seen_display_names:
                         display = f"{display} ({repo_key})"
                     seen_display_names.add(display)
-                    entry = dict(defaults)
+                    if isinstance(defaults, dict):
+                        entry = dict(defaults)
+                    else:
+                        entry = {}
                     entry.update(
                         {
                             "author": author,
@@ -202,8 +206,11 @@ class aistudynow_QwenVL_GGUF_PromptEnhancer:
         preferred_style = "📝 Enhance"
         default_style = preferred_style if preferred_style in styles else (styles[0] if styles else "📝 Enhance")
         temp = cls.load_gguf_models()
-        model_keys = sorted(list((temp.get("models") or {}).keys())) or ["(edit gguf_models.json)"]
-        default_model = model_keys[0]
+        models_data = temp.get("models")
+        if not isinstance(models_data, dict):
+            models_data = {}
+        model_keys = sorted(list(models_data.keys())) or ["(edit gguf_models.json)"]
+        default_model = model_keys[0] if model_keys else "(none)"
         return {
             "required": {
                 "model_name": (model_keys, {"default": default_model, "tooltip": "GGUF model entry defined in gguf_models.json."}),
@@ -230,15 +237,24 @@ class aistudynow_QwenVL_GGUF_PromptEnhancer:
         _release_cuda_vram()
 
     def _resolve_model_path(self, model_name):
-        models = self.gguf_models.get("models") or {}
+        models_raw = self.gguf_models.get("models")
+        if isinstance(models_raw, dict):
+            models = models_raw
+        else:
+            models = {}
         entry = models.get(model_name) or {}
 
         # Back-compat: allow workflows to pass a filename instead of a catalog key.
+        if not isinstance(entry, dict):
+            entry = {}
+
         if not entry:
             wanted = _model_name_to_filename_candidates(model_name)
             for candidate in models.values():
+                if not isinstance(candidate, dict):
+                    continue
                 filename = candidate.get("filename")
-                if filename and Path(filename).name in wanted:
+                if isinstance(filename, str) and Path(filename).name in wanted:
                     entry = candidate
                     break
 
@@ -261,13 +277,22 @@ class aistudynow_QwenVL_GGUF_PromptEnhancer:
     def _maybe_download_model(self, model_name, resolved):
         if resolved.exists():
             return
-        models = self.gguf_models.get("models") or {}
+        models_raw = self.gguf_models.get("models")
+        if isinstance(models_raw, dict):
+            models = models_raw
+        else:
+            models = {}
         entry = models.get(model_name) or {}
+        if not isinstance(entry, dict):
+            entry = {}
+
         if not entry:
             wanted = _model_name_to_filename_candidates(model_name)
             for candidate in models.values():
+                if not isinstance(candidate, dict):
+                    continue
                 filename = candidate.get("filename")
-                if filename and Path(filename).name in wanted:
+                if isinstance(filename, str) and Path(filename).name in wanted:
                     entry = candidate
                     break
 
@@ -320,8 +345,13 @@ class aistudynow_QwenVL_GGUF_PromptEnhancer:
     def _load_model(self, model_name, device):
         resolved = self._resolve_model_path(model_name)
         self._maybe_download_model(model_name, resolved)
-        model_cfg = self.gguf_models["models"].get(model_name, {})
-        context_length = model_cfg.get("context_length", 8192)
+        models_data = self.gguf_models.get("models")
+        if not isinstance(models_data, dict):
+            models_data = {}
+        model_cfg = models_data.get(model_name)
+        if not isinstance(model_cfg, dict):
+            model_cfg = {}
+        context_length = int(model_cfg.get("context_length", 8192))
         signature = (resolved, context_length, device)
         if self.llm is not None and self.current_signature == signature:
             return
@@ -347,8 +377,8 @@ class aistudynow_QwenVL_GGUF_PromptEnhancer:
             "verbose": False,
             "chat_format": "qwen",
         }
-        self.llm = Llama(**kwargs)
-        self.current_signature = signature
+        self.llm = Llama(**kwargs)  # type: ignore
+        self.current_signature = signature  # type: ignore
 
     def _invoke_llama(
         self,
@@ -372,20 +402,34 @@ class aistudynow_QwenVL_GGUF_PromptEnhancer:
             )
 
         def _call(system: str, user: str, temp: float, seed_val: int) -> str:
-            response = self.llm.create_chat_completion(
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                max_tokens=max_tokens,
-                temperature=temp,
-                top_p=top_p,
-                repeat_penalty=repetition_penalty,
-                seed=seed_val,
-            )
-            if not response or "choices" not in response or not response["choices"]:
+            if hasattr(self.llm, "create_chat_completion"):
+                response = self.llm.create_chat_completion(  # type: ignore
+                    messages=[
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                    max_tokens=max_tokens,
+                    temperature=temp,
+                    top_p=top_p,
+                    repeat_penalty=repetition_penalty,
+                    seed=seed_val,
+                )
+            else:
+                response = None
+            if not response or not isinstance(response, dict) or "choices" not in response or not response["choices"]:
                 raise RuntimeError("[QwenVL] llama_cpp returned empty response")
-            return (response["choices"][0].get("message", {}).get("content", "") or "").strip()
+            safe_resp = response  # type: ignore
+            choices: list[dict] | None = safe_resp.get("choices")
+            if not choices or not isinstance(choices, list):
+                raise RuntimeError("[QwenVL] llama_cpp returned empty choices")
+            first_choice = choices[0]
+            if not isinstance(first_choice, dict):
+                first_choice = {}
+            msg = first_choice.get("message")
+            if not isinstance(msg, dict):
+                msg = {}
+            content = msg.get("content", "")
+            return (content or "").strip()
 
         raw = _call(system_prompt, user_prompt, float(temperature), int(seed))
         cleaned = clean_model_output(raw, OutputCleanConfig(mode="prompt"))

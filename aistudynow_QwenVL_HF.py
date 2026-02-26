@@ -19,24 +19,25 @@ import os
 import platform
 from enum import Enum
 from pathlib import Path
+from typing import Any
 
-import numpy as np
-import psutil
-import torch
-from PIL import Image
-from huggingface_hub import snapshot_download
+import numpy as np  # type: ignore
+import psutil  # type: ignore
+import torch  # type: ignore
+from PIL import Image  # type: ignore
+from huggingface_hub import snapshot_download  # type: ignore
 try:
-    from transformers import AutoModelForImageTextToText as AutoModelForVision2Seq
+    from transformers import AutoModelForImageTextToText as AutoModelForVision2Seq  # type: ignore
 except ImportError:
-    from transformers import AutoModelForVision2Seq
-from transformers import AutoProcessor, AutoTokenizer, BitsAndBytesConfig
+    from transformers import AutoModelForVision2Seq  # type: ignore
+from transformers import AutoProcessor, AutoTokenizer, BitsAndBytesConfig  # type: ignore
 
-import folder_paths
-from comfy.utils import ProgressBar
+import folder_paths  # type: ignore
+from comfy.utils import ProgressBar  # type: ignore
 
 # SageAttention support
 try:
-    from sageattention.core import (
+    from sageattention.core import (  # type: ignore
         sageattn_qk_int8_pv_fp16_cuda,
         sageattn_qk_int8_pv_fp8_cuda,
         sageattn_qk_int8_pv_fp8_cuda_sm90,
@@ -52,7 +53,10 @@ HF_VL_MODELS: dict[str, dict] = {}
 HF_TEXT_MODELS: dict[str, dict] = {}
 HF_ALL_MODELS: dict[str, dict] = {}
 SYSTEM_PROMPTS = {}
-PRESET_PROMPTS: list[str] = ["Describe this image in detail."]
+PRESET_PROMPTS: list[str] = [
+    "Describe this image in detail.",
+    "Look at this image and describe ONLY the character's body structure, physical posture, and the exact position of their arms and legs. You are an expert anatomy observer."
+]
 
 TOOLTIPS = {
     "model_name": "Pick the Qwen-VL checkpoint. First run downloads weights into models/LLM/Qwen-VL, so leave disk space.",
@@ -102,7 +106,7 @@ def load_model_configs():
             HF_VL_MODELS = {k: v for k, v in data.items() if not k.startswith("_")}
             HF_TEXT_MODELS = {}
         SYSTEM_PROMPTS = data.get("_system_prompts", {})
-        PRESET_PROMPTS = data.get("_preset_prompts", PRESET_PROMPTS)
+        PRESET_PROMPTS = data.get("_preset_prompts") or PRESET_PROMPTS
     except Exception as exc:
         print(f"[QwenVL] Config load failed: {exc}")
         HF_VL_MODELS = {}
@@ -224,7 +228,7 @@ def flash_attn_available():
         return False
 
     try:
-        import flash_attn  # noqa: F401
+        import flash_attn  # type: ignore # noqa: F401
     except Exception:
         return False
 
@@ -333,21 +337,21 @@ def set_sage_attention(model):
     
     # Qwen2 models
     try:
-        from transformers.models.qwen2.modeling_qwen2 import Qwen2Attention, apply_rotary_pos_emb as qwen2_apply_rotary
+        from transformers.models.qwen2.modeling_qwen2 import Qwen2Attention, apply_rotary_pos_emb as qwen2_apply_rotary  # type: ignore
         attention_classes.append((Qwen2Attention, qwen2_apply_rotary))
     except ImportError:
         pass
     
     # Qwen3 models (Qwen3-VL, etc.)
     try:
-        from transformers.models.qwen3.modeling_qwen3 import Qwen3Attention, apply_rotary_pos_emb as qwen3_apply_rotary
+        from transformers.models.qwen3.modeling_qwen3 import Qwen3Attention, apply_rotary_pos_emb as qwen3_apply_rotary  # type: ignore
         attention_classes.append((Qwen3Attention, qwen3_apply_rotary))
     except ImportError:
         pass
     
     # Qwen3-VL specific
     try:
-        from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextAttention, apply_rotary_pos_emb as qwen3vl_apply_rotary
+        from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextAttention, apply_rotary_pos_emb as qwen3vl_apply_rotary  # type: ignore
         attention_classes.append((Qwen3VLTextAttention, qwen3vl_apply_rotary))
     except ImportError:
         pass
@@ -360,7 +364,7 @@ def set_sage_attention(model):
         def sage_attention_forward(
             self,
             hidden_states: torch.Tensor,
-            position_embeddings: tuple = None,
+            position_embeddings=None,
             attention_mask: torch.Tensor = None,
             past_key_values=None,
             cache_position: torch.LongTensor = None,
@@ -412,6 +416,7 @@ def set_sage_attention(model):
 
             is_causal = attention_mask is None and q_len > 1
 
+            assert callable(SAGE_ATTN_FUNC)
             attn_output = SAGE_ATTN_FUNC(
                 query_states.to(target_dtype),
                 key_states.to(target_dtype),
@@ -425,7 +430,7 @@ def set_sage_attention(model):
             if isinstance(attn_output, tuple):
                 attn_output = attn_output[0]
 
-            attn_output = attn_output.transpose(1, 2).contiguous()
+            attn_output = attn_output.transpose(1, 2).contiguous()  # type: ignore
             attn_output = attn_output.reshape(*input_shape, -1)
 
             attn_output = self.o_proj(attn_output)
@@ -442,8 +447,8 @@ def set_sage_attention(model):
     for AttentionClass, apply_rotary_func in attention_classes:
         sage_forward = make_sage_forward(AttentionClass, apply_rotary_func)
         for module in model.modules():
-            if isinstance(module, AttentionClass):
-                module.forward = sage_forward.__get__(module, AttentionClass)
+            if isinstance(module, AttentionClass):  # type: ignore
+                module.forward = sage_forward.__get__(module, AttentionClass)  # type: ignore
                 patched_count += 1
 
     if patched_count > 0:
@@ -539,10 +544,10 @@ def quantization_config(model_name, quantization):
 class QwenVLBase:
     def __init__(self):
         self.device_info = get_device_info()
-        self.model = None
-        self.processor = None
-        self.tokenizer = None
-        self.current_signature = None
+        self.model: Any = None
+        self.processor: Any = None
+        self.tokenizer: Any = None
+        self.current_signature: tuple | None = None
         print(f"[QwenVL] Node on {self.device_info['device_type']}")
 
     def clear(self):
@@ -598,7 +603,7 @@ class QwenVLBase:
         
         print(f"[QwenVL] Attention backend selected: {attn_impl}")
         
-        device_requested = self.device_info["recommended_device"] if device_choice == "auto" else device_choice
+        device_requested = str(self.device_info["recommended_device"] if device_choice == "auto" else device_choice)
         device = normalize_device_choice(device_requested)
         signature = (model_name, quant.value, attn_impl, device, use_compile)
         
@@ -620,7 +625,7 @@ class QwenVLBase:
             actual_attn_impl = "sdpa"
         
         # Build load kwargs
-        load_kwargs = {
+        load_kwargs: dict[str, Any] = {
             "attn_implementation": actual_attn_impl,
             "use_safetensors": True,
         }
@@ -663,7 +668,7 @@ class QwenVLBase:
                 print(f"[QwenVL] Loading weights from {model_path}")
                 try:
                     # Use HuggingFace's official sharded checkpoint loading
-                    from transformers.modeling_utils import load_sharded_checkpoint
+                    from transformers.modeling_utils import load_sharded_checkpoint  # type: ignore
                     
                     print(f"[QwenVL] Loading weights from {model_path}")
                     
@@ -676,8 +681,8 @@ class QwenVLBase:
                         print("[QwenVL] All shards loaded successfully")
                     else:
                         # Single-file checkpoint - use HF's standard loading
-                        from transformers.modeling_utils import load_state_dict
-                        from transformers.utils import SAFE_WEIGHTS_NAME, WEIGHTS_NAME
+                        from transformers.modeling_utils import load_state_dict  # type: ignore
+                        from transformers.utils import SAFE_WEIGHTS_NAME, WEIGHTS_NAME  # type: ignore
                         
                         if os.path.exists(os.path.join(model_path, SAFE_WEIGHTS_NAME)):
                             state_dict_path = os.path.join(model_path, SAFE_WEIGHTS_NAME)
@@ -772,20 +777,21 @@ class QwenVLBase:
         num_beams,
         repetition_penalty,
     ):
-        conversation = [{"role": "user", "content": []}]
+        content_list: list[dict[str, Any]] = []
         if image is not None:
-            conversation[0]["content"].append({"type": "image", "image": self.tensor_to_pil(image)})
+            content_list.append({"type": "image", "image": self.tensor_to_pil(image)})
         if video is not None:
             frames = [self.tensor_to_pil(frame) for frame in video]
             if len(frames) > frame_count:
                 idx = np.linspace(0, len(frames) - 1, frame_count, dtype=int)
                 frames = [frames[i] for i in idx]
             if frames:
-                conversation[0]["content"].append({"type": "video", "video": frames})
-        conversation[0]["content"].append({"type": "text", "text": prompt_text})
+                content_list.append({"type": "video", "video": frames})
+        content_list.append({"type": "text", "text": prompt_text})
+        conversation = [{"role": "user", "content": content_list}]
         chat = self.processor.apply_chat_template(conversation, tokenize=False, add_generation_prompt=True)
-        images = [item["image"] for item in conversation[0]["content"] if item["type"] == "image"]
-        video_frames = [frame for item in conversation[0]["content"] if item["type"] == "video" for frame in item["video"]]
+        images = [item["image"] for item in content_list if item["type"] == "image"]
+        video_frames = [frame for item in content_list if item["type"] == "video" for frame in item["video"]]
         videos = [video_frames] if video_frames else None
         processed = self.processor(text=chat, images=images or None, videos=videos, return_tensors="pt")
         model_device = next(self.model.parameters()).device

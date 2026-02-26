@@ -18,14 +18,15 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
-import numpy as np
-import torch
-from huggingface_hub import hf_hub_download
-from PIL import Image
+import numpy as np  # type: ignore
+import torch  # type: ignore
+from huggingface_hub import hf_hub_download  # type: ignore
+from PIL import Image  # type: ignore
 
-import folder_paths
-from aistudynow_OutputCleaner import OutputCleanConfig, clean_model_output
+import folder_paths  # type: ignore
+from aistudynow_OutputCleaner import OutputCleanConfig, clean_model_output  # type: ignore
 
 NODE_DIR = Path(__file__).parent
 CONFIG_PATH = NODE_DIR / "hf_models.json"
@@ -34,7 +35,10 @@ GGUF_CONFIG_PATH = NODE_DIR / "gguf_models.json"
 
 
 def _load_prompt_config():
-    preset_prompts = ["🖼️ Detailed Description"]
+    preset_prompts = [
+        "🖼️ Detailed Description",
+        "Look at this image and describe ONLY the character's body structure, physical posture, and the exact position of their arms and legs. You are an expert anatomy observer."
+    ]
     system_prompts: dict[str, str] = {}
 
     try:
@@ -126,6 +130,8 @@ def _load_gguf_vl_catalog():
 
     repos = data.get("qwenVL_model") or data.get("vl_repos") or data.get("repos") or {}
     seen_display_names: set[str] = set()
+    if not isinstance(repos, dict):
+        repos = {}
     for repo_key, repo in repos.items():
         if not isinstance(repo, dict):
             continue
@@ -153,7 +159,15 @@ def _load_gguf_vl_catalog():
                 "mmproj_filename": mmproj_file,
             }
 
-    legacy_models = data.get("models") or {}
+    if isinstance(data, dict):
+        legacy_models_raw = data.get("models")
+    else:
+        legacy_models_raw = {}
+
+    if isinstance(legacy_models_raw, dict):
+        legacy_models = legacy_models_raw
+    else:
+        legacy_models = {}
     for name, entry in legacy_models.items():
         if isinstance(entry, dict):
             flattened[name] = entry
@@ -255,15 +269,25 @@ def _download_single_file(repo_ids: list[str], filename: str, target_path: Path)
 
 
 def _resolve_model_entry(model_name: str) -> GGUFVLResolved:
-    all_models = GGUF_VL_CATALOG.get("models") or {}
+    all_models = GGUF_VL_CATALOG.get("models")
+    if not isinstance(all_models, dict):
+        all_models = {}
     entry = all_models.get(model_name) or {}
+    if not isinstance(entry, dict):
+        entry = {}
     if not entry:
         wanted = _model_name_to_filename_candidates(model_name)
-        for candidate in all_models.values():
-            filename = candidate.get("filename")
-            if filename and Path(filename).name in wanted:
-                entry = candidate
-                break
+        if isinstance(all_models, dict):
+            for candidate in all_models.values():
+                if not isinstance(candidate, dict):
+                    continue
+                filename = candidate.get("filename")
+                if isinstance(filename, str) and Path(filename).name in wanted:
+                    entry = candidate
+                    break
+
+    if not isinstance(entry, dict):
+        raise ValueError(f"[QwenVL] gguf_vl_models.json entry is invalid for: {model_name}")
 
     repo_id = entry.get("repo_id")
     alt_repo_ids = entry.get("alt_repo_ids") or []
@@ -373,7 +397,7 @@ class QwenVLGGUFBase:
 
     def _load_backend(self):
         try:
-            from llama_cpp import Llama  # noqa: F401
+            from llama_cpp import Llama  # type: ignore # noqa: F401
         except Exception as exc:
             raise RuntimeError(
                 "[QwenVL] llama_cpp is not available. Install the GGUF vision dependency first. See docs/GGUF_MANUAL_INSTALL.md"
@@ -393,29 +417,31 @@ class QwenVLGGUFBase:
         self._load_backend()
 
         resolved = _resolve_model_entry(model_name)
-        base_dir = _resolve_base_dir(GGUF_VL_CATALOG.get("base_dir") or "llm/GGUF")
+        base_dir_val = GGUF_VL_CATALOG.get("base_dir") or "llm/GGUF"
+        base_dir_str = str(base_dir_val)
+        base_dir = _resolve_base_dir(base_dir_str)
 
         author_dir = _safe_dirname(resolved.author or "")
         repo_dir = _safe_dirname(resolved.repo_dirname)
         target_dir = base_dir / author_dir / repo_dir
 
-        model_path = target_dir / Path(resolved.model_filename).name
-        mmproj_path = target_dir / Path(resolved.mmproj_filename).name if resolved.mmproj_filename else None
+        model_path = target_dir / Path(str(resolved.model_filename)).name
+        mmproj_path = target_dir / Path(str(resolved.mmproj_filename)).name if resolved.mmproj_filename else None
 
         repo_ids: list[str] = []
         if resolved.repo_id:
-            repo_ids.append(resolved.repo_id)
+            repo_ids.append(str(resolved.repo_id))
         repo_ids.extend(resolved.alt_repo_ids)
 
         if not model_path.exists():
             if not repo_ids:
                 raise FileNotFoundError(f"[QwenVL] GGUF model not found locally and no repo_id provided: {model_path}")
-            _download_single_file(repo_ids, resolved.model_filename, model_path)
+            _download_single_file(repo_ids, str(resolved.model_filename), model_path)
 
         if mmproj_path is not None and not mmproj_path.exists():
             if not repo_ids:
                 raise FileNotFoundError(f"[QwenVL] mmproj not found locally and no repo_id provided: {mmproj_path}")
-            _download_single_file(repo_ids, resolved.mmproj_filename, mmproj_path)
+            _download_single_file(repo_ids, str(resolved.mmproj_filename), mmproj_path)
 
         device_kind = _pick_device(device)
 
@@ -448,18 +474,18 @@ class QwenVLGGUFBase:
 
         self.clear()
 
-        from llama_cpp import Llama
+        from llama_cpp import Llama  # type: ignore
 
         self.chat_handler = None
         if has_mmproj:
             handler_cls = None
             try:
-                from llama_cpp.llama_chat_format import Qwen3VLChatHandler
+                from llama_cpp.llama_chat_format import Qwen3VLChatHandler  # type: ignore
 
                 handler_cls = Qwen3VLChatHandler
             except ImportError:
                 try:
-                    from llama_cpp.llama_chat_format import Qwen25VLChatHandler
+                    from llama_cpp.llama_chat_format import Qwen25VLChatHandler  # type: ignore
 
                     handler_cls = Qwen25VLChatHandler
                 except ImportError:
@@ -481,7 +507,7 @@ class QwenVLGGUFBase:
                 )
             self.chat_handler = handler_cls(**mmproj_kwargs)
 
-        llm_kwargs = {
+        llm_kwargs: dict[str, Any] = {
             "model_path": str(model_path),
             "n_ctx": n_ctx,
             "n_gpu_layers": n_gpu_layers,
@@ -506,7 +532,7 @@ class QwenVLGGUFBase:
         if device_kind == "cuda" and n_gpu_layers == 0:
             print("[QwenVL] Warning: device=cuda selected but n_gpu_layers=0; model will run on CPU.")
         self.llm = Llama(**llm_kwargs_filtered)
-        self.current_signature = signature
+        self.current_signature = signature  # type: ignore
 
     def _invoke(
         self,
@@ -520,7 +546,7 @@ class QwenVLGGUFBase:
         seed: int,
     ) -> str:
         if images_b64:
-            content = [{"type": "text", "text": user_prompt}]
+            content: list[dict[str, Any]] = [{"type": "text", "text": user_prompt}]
             for img in images_b64:
                 if not img:
                     continue
@@ -536,15 +562,18 @@ class QwenVLGGUFBase:
             ]
 
         start = time.perf_counter()
-        result = self.llm.create_chat_completion(
-            messages=messages,
-            max_tokens=int(max_tokens),
-            temperature=float(temperature),
-            top_p=float(top_p),
-            repeat_penalty=float(repetition_penalty),
-            seed=int(seed),
-            stop=["<|im_end|>", "<|im_start|>"],
-        )
+        if hasattr(self.llm, "create_chat_completion"):
+            result = self.llm.create_chat_completion(  # type: ignore
+                messages=messages,
+                max_tokens=int(max_tokens),
+                temperature=float(temperature),
+                top_p=float(top_p),
+                repeat_penalty=float(repetition_penalty),
+                seed=int(seed),
+                stop=["<|im_end|>", "<|im_start|>"],
+            )
+        else:
+             raise RuntimeError("LLM not initialized properly")
         elapsed = max(time.perf_counter() - start, 1e-6)
 
         usage = result.get("usage") or {}
@@ -560,8 +589,12 @@ class QwenVLGGUFBase:
             else:
                 print(f"[QwenVL] Tokens: completion={completion_tokens}, time={elapsed:.2f}s, speed={tok_s:.2f} tok/s")
 
-        content = (result.get("choices") or [{}])[0].get("message", {}).get("content", "")
-        cleaned = clean_model_output(str(content or ""), OutputCleanConfig(mode="text"))
+        content_res = (result.get("choices") or [{}])[0].get("message", {}).get("content", "")
+        if isinstance(content_res, list):
+            content_str = str(content_res[0])
+        else:
+            content_str = str(content_res or "")
+        cleaned = clean_model_output(content_str, OutputCleanConfig(mode="text"))
         return cleaned.strip()
 
     def run(
@@ -639,10 +672,15 @@ class aistudynow_QwenVL_GGUF(QwenVLGGUFBase):
     @classmethod
     def INPUT_TYPES(cls):
         all_models = GGUF_VL_CATALOG.get("models") or {}
+        if not isinstance(all_models, dict):
+            all_models = {}
         model_keys = sorted([key for key, entry in all_models.items() if (entry or {}).get("mmproj_filename")]) or ["(edit gguf_models.json)"]
         default_model = model_keys[0]
 
-        prompts = PRESET_PROMPTS or ["🖼️ Detailed Description"]
+        prompts = PRESET_PROMPTS or [
+            "🖼️ Detailed Description",
+            "Look at this image and describe ONLY the character's body structure, physical posture, and the exact position of their arms and legs. You are an expert anatomy observer."
+        ]
         preferred_prompt = "🖼️ Detailed Description"
         default_prompt = preferred_prompt if preferred_prompt in prompts else prompts[0]
 
@@ -704,10 +742,15 @@ class aistudynow_QwenVL_GGUF_Advanced(QwenVLGGUFBase):
     @classmethod
     def INPUT_TYPES(cls):
         all_models = GGUF_VL_CATALOG.get("models") or {}
+        if not isinstance(all_models, dict):
+             all_models = {}
         model_keys = sorted([key for key, entry in all_models.items() if (entry or {}).get("mmproj_filename")]) or ["(edit gguf_models.json)"]
         default_model = model_keys[0]
 
-        prompts = PRESET_PROMPTS or ["🖼️ Detailed Description"]
+        prompts = PRESET_PROMPTS or [
+            "🖼️ Detailed Description",
+            "Look at this image and describe ONLY the character's body structure, physical posture, and the exact position of their arms and legs. You are an expert anatomy observer."
+        ]
         preferred_prompt = "🖼️ Detailed Description"
         default_prompt = preferred_prompt if preferred_prompt in prompts else prompts[0]
 

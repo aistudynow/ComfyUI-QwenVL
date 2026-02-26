@@ -128,13 +128,19 @@ def _drop_preamble(text: str) -> str:
         return text
 
     keep_from = 0
-    for i, ln in enumerate(lines[:20]):
+    limit = min(20, len(lines))
+    for i in range(limit):
+        ln = lines[i]
         if _MARKER_RE.match(ln):
             keep_from = i
         if re.search(r"(?i)\bhere(?:'s| is)\b", ln) and i < 6:
             keep_from = max(keep_from, i + 1)
 
-    return "\n".join(lines[keep_from:]).strip()
+    result_lines = []
+    for i in range(keep_from, len(lines)):
+        result_lines.append(lines[i])
+
+    return "\n".join(result_lines).strip()
 
 
 def _strip_planning_paragraphs(text: str) -> str:

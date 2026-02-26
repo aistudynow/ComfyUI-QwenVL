@@ -13,7 +13,8 @@
     "Write a short story inspired by this image.",
     "Write a short poem inspired by this image.",
     "Create a catchy advertising slogan for this image.",
-    "[For Batch Images] Describe each image individually."
+    "[For Batch Images] Describe each image individually.",
+    "You are an expert anatomy observer. Look at this image and describe ONLY the character's body structure, physical posture, and the exact position of their arms and legs. Do NOT describe the clothing, the facial features, the identity, or the background."
   ],
   "Qwen3-VL-2B-Instruct": {
     "repo_id": "Qwen/Qwen3-VL-2B-Instruct",
