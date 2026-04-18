@@ -92,12 +92,20 @@ def get_device_info() -> dict:
     recommended_device = "cpu"
 
     if torch.cuda.is_available():
-        props = torch.cuda.get_device_properties(0)
-        total_mem = props.total_memory / 1024**3
+        total_mem = 0.0
+        free_mem = 0.0
+        try:
+            free_bytes, total_bytes = torch.cuda.mem_get_info(0)
+            total_mem = total_bytes / 1024**3
+            free_mem = free_bytes / 1024**3
+        except Exception:
+            props = torch.cuda.get_device_properties(0)
+            total_mem = props.total_memory / 1024**3
+            free_mem = max(0.0, total_mem - (torch.cuda.memory_reserved(0) / 1024**3))
         gpu_info = {
             "available": True,
             "total_memory": total_mem,
-            "free_memory": total_mem - (torch.cuda.memory_allocated(0) / 1024**3),
+            "free_memory": free_mem,
         }
         device_type = "nvidia_gpu"
         recommended_device = "cuda"
@@ -451,6 +459,40 @@ def get_model_input_device(model) -> torch.device:
         if param.device.type != "meta":
             return param.device
     return torch.device("cpu")
+
+
+QUANTIZED_CPU_DISK_OFFLOAD_HINTS = (
+    "Some modules are dispatched on the CPU or the disk",
+    "llm_int8_enable_fp32_cpu_offload=True",
+)
+
+
+def build_explicit_cuda_device_map(device: str) -> dict[str, int] | None:
+    normalized = normalize_device_choice(device)
+    if not str(normalized).startswith("cuda"):
+        return None
+    if normalized == "cuda":
+        try:
+            return {"": torch.cuda.current_device()}
+        except Exception:
+            return {"": 0}
+    try:
+        return {"": int(str(normalized).split(":", 1)[1])}
+    except (ValueError, IndexError):
+        return {"": 0}
+
+
+def is_quantized_cpu_disk_offload_error(exc: Exception) -> bool:
+    message = str(exc)
+    return any(hint in message for hint in QUANTIZED_CPU_DISK_OFFLOAD_HINTS)
+
+
+def lower_quantization_mode(quantization: str) -> str | None:
+    if quantization == Quantization.NONE:
+        return Quantization.Q8_BIT
+    if quantization == Quantization.Q8_BIT:
+        return Quantization.Q4_BIT
+    return None
 
 
 def _human_bytes(n_bytes: int | None = None) -> str:
@@ -866,7 +908,7 @@ class aistudynow_QwenVL_Advanced:
             elif is_bnb_quantization:
                 print("[QwenVL] BitsAndBytes quantization detected - forcing SDPA attention")
 
-        signature = (
+        requested_signature = (
             model_name,
             adjusted_quantization,
             effective_device,
@@ -874,7 +916,7 @@ class aistudynow_QwenVL_Advanced:
             attn_impl,
             bool(use_torch_compile),
         )
-        if self.model is not None and self.current_signature == signature:
+        if self.model is not None and self.current_signature == requested_signature:
             return
 
         self.clear_model_resources()
@@ -882,23 +924,6 @@ class aistudynow_QwenVL_Advanced:
         model_path = self.downloader.ensure_model_available(
             base_model_name, repo_id_override=base_model_info.get("repo_id")
         )
-
-        quant_config = None
-        load_dtype = None if is_prequantized_fp8 else torch.float16
-        if not is_prequantized_fp8:
-            if adjusted_quantization == Quantization.Q4_BIT:
-                quant_config = BitsAndBytesConfig(
-                    load_in_4bit=True,
-                    bnb_4bit_compute_dtype=torch.float16,
-                    bnb_4bit_quant_type="nf4",
-                    bnb_4bit_use_double_quant=True,
-                )
-                load_dtype = None
-            elif adjusted_quantization == Quantization.Q8_BIT:
-                quant_config = BitsAndBytesConfig(load_in_8bit=True)
-                load_dtype = None
-            elif effective_device == "cpu":
-                load_dtype = torch.float32
 
         actual_attn_impl = "sdpa" if attn_impl == "sage" else attn_impl
 
@@ -931,38 +956,85 @@ class aistudynow_QwenVL_Advanced:
             self.model = self.model.to(target_device).eval()
             print(f"[aistudynow] FP8 model loaded on {target_device}")
         else:
-            load_kwargs: dict[str, Any] = {
-                "attn_implementation": actual_attn_impl,
-                "use_safetensors": True,
-                "trust_remote_code": True,
-            }
-            if load_dtype is not None:
-                load_kwargs["torch_dtype"] = load_dtype
-            if quant_config is not None:
-                load_kwargs["quantization_config"] = quant_config
+            final_quantization = adjusted_quantization
 
-            if device_choice == "auto":
-                load_kwargs["device_map"] = "auto"
-            elif effective_device in {"cpu", "mps"}:
-                load_kwargs["device_map"] = None
-            elif effective_device == "cuda":
-                load_kwargs["device_map"] = {"": torch.cuda.current_device()}
-            elif str(effective_device).startswith("cuda:"):
+            while True:
+                is_bnb_quantization = final_quantization in (
+                    Quantization.Q4_BIT,
+                    Quantization.Q8_BIT,
+                )
+
+                quant_config = None
+                load_dtype = torch.float16
+                if final_quantization == Quantization.Q4_BIT:
+                    quant_config = BitsAndBytesConfig(
+                        load_in_4bit=True,
+                        bnb_4bit_compute_dtype=torch.float16,
+                        bnb_4bit_quant_type="nf4",
+                        bnb_4bit_use_double_quant=True,
+                    )
+                    load_dtype = None
+                elif final_quantization == Quantization.Q8_BIT:
+                    quant_config = BitsAndBytesConfig(load_in_8bit=True)
+                    load_dtype = None
+                elif effective_device == "cpu":
+                    load_dtype = torch.float32
+
+                load_kwargs: dict[str, Any] = {
+                    "attn_implementation": actual_attn_impl,
+                    "use_safetensors": True,
+                    "trust_remote_code": True,
+                }
+                if load_dtype is not None:
+                    load_kwargs["torch_dtype"] = load_dtype
+                if quant_config is not None:
+                    load_kwargs["quantization_config"] = quant_config
+
+                explicit_cuda_map = build_explicit_cuda_device_map(str(effective_device))
+                if is_bnb_quantization and explicit_cuda_map is not None:
+                    # Keep BnB models on one GPU instead of letting accelerate spill
+                    # modules to CPU/disk, which triggers intermittent load failures.
+                    load_kwargs["device_map"] = explicit_cuda_map
+                    print("[aistudynow] Using explicit CUDA device_map for quantized load.")
+                elif device_choice == "auto":
+                    load_kwargs["device_map"] = "auto"
+                elif effective_device in {"cpu", "mps"}:
+                    load_kwargs["device_map"] = None
+                elif explicit_cuda_map is not None:
+                    load_kwargs["device_map"] = explicit_cuda_map
+                else:
+                    load_kwargs["device_map"] = effective_device
+
+                print(
+                    f"[aistudynow] Loading model '{model_name}' "
+                    f"(quant={final_quantization}, attn={attn_impl}, device={effective_device})..."
+                )
                 try:
-                    load_kwargs["device_map"] = {"": int(str(effective_device).split(":", 1)[1])}
-                except (ValueError, IndexError):
-                    load_kwargs["device_map"] = {"": 0}
-            else:
-                load_kwargs["device_map"] = effective_device
+                    self.model = AutoModelForVision2Seq.from_pretrained(model_path, **load_kwargs)
+                except Exception as exc:
+                    fallback_quantization = lower_quantization_mode(final_quantization)
+                    if is_bnb_quantization and is_quantized_cpu_disk_offload_error(exc) and fallback_quantization is not None:
+                        print(
+                            "[aistudynow] Quantized load tried to offload modules to CPU/disk. "
+                            f"Retrying with {fallback_quantization}."
+                        )
+                        self.model = None
+                        gc.collect()
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                            try:
+                                torch.cuda.synchronize()
+                            except Exception:
+                                pass
+                        final_quantization = fallback_quantization
+                        continue
+                    raise
 
-            print(
-                f"[aistudynow] Loading model '{model_name}' "
-                f"(quant={adjusted_quantization}, attn={attn_impl}, device={effective_device})..."
-            )
-            self.model = AutoModelForVision2Seq.from_pretrained(model_path, **load_kwargs)
-            if load_kwargs["device_map"] is None and effective_device in {"cpu", "mps"}:
-                self.model = self.model.to(effective_device)
-            self.model = self.model.eval()
+                if load_kwargs["device_map"] is None and effective_device in {"cpu", "mps"}:
+                    self.model = self.model.to(effective_device)
+                self.model = self.model.eval()
+                adjusted_quantization = final_quantization
+                break
 
         self.processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
@@ -1005,7 +1077,14 @@ class aistudynow_QwenVL_Advanced:
         self.current_weights_path = custom_weights_path
         self.current_attention_mode = attn_impl
         self.current_use_torch_compile = bool(use_torch_compile)
-        self.current_signature = signature
+        self.current_signature = (
+            model_name,
+            adjusted_quantization,
+            effective_device,
+            custom_weights_path or "",
+            attn_impl,
+            bool(use_torch_compile),
+        )
         print("[aistudynow] Model loaded successfully.")
 
     @classmethod

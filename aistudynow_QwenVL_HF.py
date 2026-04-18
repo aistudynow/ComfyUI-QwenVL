@@ -156,12 +156,20 @@ def get_device_info():
     device_type = "cpu"
     recommended = "cpu"
     if torch.cuda.is_available():
-        props = torch.cuda.get_device_properties(0)
-        total = props.total_memory / 1024**3
+        total = 0.0
+        free = 0.0
+        try:
+            free_bytes, total_bytes = torch.cuda.mem_get_info(0)
+            total = total_bytes / 1024**3
+            free = free_bytes / 1024**3
+        except Exception:
+            props = torch.cuda.get_device_properties(0)
+            total = props.total_memory / 1024**3
+            free = max(0.0, total - (torch.cuda.memory_reserved(0) / 1024**3))
         gpu = {
             "available": True,
             "total_memory": total,
-            "free_memory": total - (torch.cuda.memory_allocated(0) / 1024**3),
+            "free_memory": free,
         }
         device_type = "nvidia_gpu"
         recommended = "cuda"
@@ -285,6 +293,40 @@ def get_sage_attention_config():
         return None, None, None
 
     return attn_func, "per_warp", pv_accum_dtype
+
+
+QUANTIZED_CPU_DISK_OFFLOAD_HINTS = (
+    "Some modules are dispatched on the CPU or the disk",
+    "llm_int8_enable_fp32_cpu_offload=True",
+)
+
+
+def build_explicit_cuda_device_map(device: str) -> dict[str, int] | None:
+    normalized = normalize_device_choice(device)
+    if not str(normalized).startswith("cuda"):
+        return None
+    if normalized == "cuda":
+        try:
+            return {"": torch.cuda.current_device()}
+        except Exception:
+            return {"": 0}
+    try:
+        return {"": int(str(normalized).split(":", 1)[1])}
+    except (ValueError, IndexError):
+        return {"": 0}
+
+
+def is_quantized_cpu_disk_offload_error(exc: Exception) -> bool:
+    message = str(exc)
+    return any(hint in message for hint in QUANTIZED_CPU_DISK_OFFLOAD_HINTS)
+
+
+def lower_quantization_mode(quantization: Quantization) -> Quantization | None:
+    if quantization == Quantization.FP16:
+        return Quantization.Q8
+    if quantization == Quantization.Q8:
+        return Quantization.Q4
+    return None
 
 def resolve_attention_mode(mode, force_sdpa=False):
     """Resolve attention mode with fallback logic.
@@ -605,10 +647,10 @@ class QwenVLBase:
         
         device_requested = str(self.device_info["recommended_device"] if device_choice == "auto" else device_choice)
         device = normalize_device_choice(device_requested)
-        signature = (model_name, quant.value, attn_impl, device, use_compile)
+        requested_signature = (model_name, quant.value, attn_impl, device, use_compile)
         
         # Check if we need to reload (model, quantization, or attention changed)
-        if keep_model_loaded and self.model is not None and self.current_signature == signature:
+        if keep_model_loaded and self.model is not None and self.current_signature == requested_signature:
             return
         
         # Clear model and VRAM before loading new configuration
@@ -616,8 +658,6 @@ class QwenVLBase:
             print("[QwenVL] Clearing previous model from memory before loading new configuration...")
         self.clear()
         model_path = ensure_model(model_name)
-        quant_config, dtype, _ = quantization_config(model_name, quant)
-        
         # Handle attention mode for loading
         # SageAttention requires loading with SDPA first, then patching
         actual_attn_impl = attn_impl
@@ -718,21 +758,59 @@ class QwenVLBase:
             self.model.eval()
             print(f"[QwenVL] FP8 model loaded on {target_device}")
         else:
-            # For regular models: use device_map and dtype
-            load_kwargs["device_map"] = device if device != "auto" else "auto"
-            if dtype:
-                load_kwargs["dtype"] = dtype
-            
-            if quant_config:
-                load_kwargs["quantization_config"] = quant_config
-            
-            # Show appropriate attention info in loading message
-            if attn_impl == "sage":
-                print(f"[QwenVL] Loading {model_name} ({quant.value}, base=sdpa, will_patch=sage)")
-            else:
-                print(f"[QwenVL] Loading {model_name} ({quant.value}, attn={actual_attn_impl})")
-            
-            self.model = AutoModelForVision2Seq.from_pretrained(model_path, **load_kwargs).eval()
+            final_quant = quant
+            while True:
+                quant_config, dtype, _ = quantization_config(model_name, final_quant)
+                current_is_bnb = final_quant in (Quantization.Q4, Quantization.Q8)
+
+                loop_kwargs = dict(load_kwargs)
+                if dtype is not None:
+                    loop_kwargs["torch_dtype"] = dtype
+                if quant_config is not None:
+                    loop_kwargs["quantization_config"] = quant_config
+
+                explicit_cuda_map = build_explicit_cuda_device_map(device)
+                if current_is_bnb and explicit_cuda_map is not None:
+                    loop_kwargs["device_map"] = explicit_cuda_map
+                    print("[QwenVL] Using explicit CUDA device_map for quantized load.")
+                elif device in {"cpu", "mps"}:
+                    loop_kwargs["device_map"] = None
+                elif explicit_cuda_map is not None:
+                    loop_kwargs["device_map"] = explicit_cuda_map
+                else:
+                    loop_kwargs["device_map"] = device
+                
+                # Show appropriate attention info in loading message
+                if attn_impl == "sage":
+                    print(f"[QwenVL] Loading {model_name} ({final_quant.value}, base=sdpa, will_patch=sage)")
+                else:
+                    print(f"[QwenVL] Loading {model_name} ({final_quant.value}, attn={actual_attn_impl})")
+                
+                try:
+                    self.model = AutoModelForVision2Seq.from_pretrained(model_path, **loop_kwargs).eval()
+                except Exception as exc:
+                    fallback_quant = lower_quantization_mode(final_quant)
+                    if current_is_bnb and is_quantized_cpu_disk_offload_error(exc) and fallback_quant is not None:
+                        print(
+                            "[QwenVL] Quantized load tried to offload modules to CPU/disk. "
+                            f"Retrying with {fallback_quant.value}."
+                        )
+                        self.model = None
+                        gc.collect()
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                            try:
+                                torch.cuda.synchronize()
+                            except Exception:
+                                pass
+                        final_quant = fallback_quant
+                        continue
+                    raise
+
+                if loop_kwargs["device_map"] is None and device in {"cpu", "mps"}:
+                    self.model = self.model.to(device)
+                quant = final_quant
+                break
         
         # Apply SageAttention patching if selected
         if attn_impl == "sage":
@@ -753,7 +831,7 @@ class QwenVLBase:
                 print(f"[QwenVL] torch.compile skipped: {exc}")
         self.processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-        self.current_signature = signature
+        self.current_signature = (model_name, quant.value, attn_impl, device, use_compile)
 
     @staticmethod
     def tensor_to_pil(tensor):

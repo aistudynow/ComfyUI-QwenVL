@@ -695,6 +695,8 @@ class aistudynow_QwenVL_GGUF(QwenVLGGUFBase):
             },
             "optional": {
                 "image": ("IMAGE",),
+                "image_2": ("IMAGE",),
+                "image_3": ("IMAGE",),
                 "video": ("IMAGE",),
             },
         }
